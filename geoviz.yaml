@@ -1,0 +1,122 @@
+# This file contains a deployment and service configuration for a
+# generic, HTTP2-based backend. The use of HTTP2 also implies the use of
+# TLS between the load-balancer and the backend. This basic
+# configuration also works equally well for HTTPS-1.1 or HTTP backends,
+# there are callouts below for deletions to make.
+
+# This deployment object defines a pod template and a replica count.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # What's with labels vs names?  The name is how the configuration
+  # object is identified by k8s.  The labels are arbitrary key-value
+  # pairs, which are used for categorization and selection.  Often,
+  # there will be both "app" and "env" keys, or "canary: true" labels.
+  labels:
+    app: geoviz
+  name: geoviz
+spec:
+  # This combination of replicas and selector is really saying
+  # "ensure that there are this many pods that match the given label selector".
+  replicas: 1
+  selector:
+    matchLabels:
+      app: geoviz
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: geoviz
+    spec:
+      containers:
+        - image: gcr.io/cockroach-dev-inf/otan-cockroach/geoviz:6354354-otan
+          imagePullPolicy: Always
+          name: geoviz
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+          # A Kubernetes Secret is a key-value map that can be used to
+          # populate environment variables or it can be mounted as
+          # though it were a collection of files. Here, we're going to
+          # say that all keys defined in this secret should be mapped as
+          # environment variables. It's possible, if somewhat tedious,
+          # to do this on a variable-by-variable basis, too.
+          #
+          # If the executable in the container is configured via
+          # command-line flags, these environment variables can be used
+          # in the usual way in an args block.
+          envFrom:
+            - secretRef:
+                name: geoviz-env-vars
+          # Liveness determine if the container should be terminated.
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              # EDITME Ensure this port name and the scheme match what
+              # your your app is doing.
+              port: http
+              scheme: HTTP
+          # Readiness controls when the container is available to serve
+          # network requests. For many services, this will be the same
+          # query as above. If the backend needs to establish many
+          # remote connections or transfer data before actually being
+          # able to serve, the use of distinct liveness and readiness
+          # probes allows the "failure to launch" case to be detected.
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz?ready=1
+              # EDITME Ensure this port name and the scheme match what
+              # your your app is doing.
+              port: http
+              scheme: HTTP
+          resources:
+            # The requested amount is used to place the pod on a
+            # particular machine.
+            #
+            # EDITME: These values are often determined empirically.
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            # These are hard limits that will result in the termination
+            # of the container.
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      terminationGracePeriodSeconds: 30
+---
+# This service object creates a virtual IP address within the cluster
+# that will steer traffic to pods that match a label selector.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: geoviz
+  name: geoviz
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      # EDITME This should be the containerPort.name value.
+      targetPort: http
+  # This label selector matches against pod labels. Image a case where
+  # you have three replicas with a "branch:stable" label and one  with a
+  # "branch:canary". Since all four would have an "app:myapp" label, the
+  # service will steer traffic between all instances. This requires, of
+  # course, that the backend can operate in a mixed-version deployment.
+  selector:
+    app: geoviz
+    # This is also a "NodePort" service (as opposed to "LoadBalancer"),
+    # which makes every machine in the k8s cluster forward network
+    # traffic from an arbitrarily-chosen port number on the host
+    # machine's "real" IP address. This is ultimately how the Ingress
+    # controller routes HTTP requests into the cluster.
+  type: NodePort
